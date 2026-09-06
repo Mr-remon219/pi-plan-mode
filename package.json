@@ -1,6 +1,6 @@
 {
   "name": "@mr_remon/pi-plan-mode",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "Native Plan Mode for Pi with streamed Markdown plans, unrestricted exploration, and explicit approval before local file edits.",
   "license": "MIT",
@@ -17,13 +17,14 @@
   "pi": { "extensions": ["./src/index.ts"] },
   "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/" },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
-    "typebox": "*"
+    "@earendil-works/pi-coding-agent": ">=0.85.1 <0.86.0",
+    "@earendil-works/pi-tui": ">=0.85.1 <0.86.0",
+    "typebox": "^1.3.7"
   },
   "scripts": {
     "test": "node scripts/verify.mjs test",
     "typecheck": "node scripts/verify.mjs typecheck",
-    "smoke": "node scripts/verify.mjs smoke"
+    "smoke": "node scripts/verify.mjs smoke",
+    "benchmark": "node scripts/verify.mjs benchmark"
   }
 }

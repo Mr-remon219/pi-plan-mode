@@ -1,60 +1,59 @@
-# Design notes
+# Design: v0.4
 
-Pi Plan Mode was designed after comparing three families of implementations:
+## Contract
 
-- Codex CLI treats Plan Mode as a collaboration state distinct from its task checklist.
-- Claude Code couples read-only exploration with an explicit plan review and approval transition.
-- Existing Pi examples demonstrate the extension APIs, but commonly infer plans from assistant text or disable only built-in write tools.
+Plan Mode is an exploration-first Pi extension, not an OS sandbox or an execution orchestrator. It retains shell, web, MCP and subagent capabilities. Only `edit`, `write`, `apply_patch` are directly blocked; prompts forbid indirect implementation. `ready` means syntactically valid and awaiting review, not professionally validated.
 
-This extension adapts those ideas to Pi rather than copying another client's permission model.
+## Stream capture
 
-## Architecture decisions
+Plans use standalone `<proposed_plan>` lines in normal assistant text. A line parser handles fences and CRLF (normalized to LF for the artifact). Nested, duplicate, stray and incomplete delimiters are rejected. Delimiters inside fences are examples, not control signals. Tags spanning content blocks are conservatively rejected. Only a current assistant message begun in planning, ending with `stop` and no tool calls, can be captured. Captures bind epoch, revision, timestamp, unique persisted entry identity, full-message fingerprint and block offsets. Replayed turn_end events cannot create another revision.
 
-1. **Extension, not host fork.** Pi's public extension API provides commands, tools, lifecycle hooks, session entries, prompt injection, and native TUI components.
-2. **State is authoritative.** `off`, `planning`, and `ready` are explicit extension states. Assistant prose and todo markers do not change modes.
-3. **The plan is a streamed artifact.** The model emits one `<proposed_plan>` Markdown block as ordinary assistant text. After a successful turn, the host validates and stores it with a revision; no giant tool argument or lossy numbered-list extraction is involved.
-4. **The host owns approval.** The model has no exit or approve tool. Only the user-facing TUI can approve execution.
-5. **Exploration-first policy.** Plan Mode keeps existing shell, web, MCP, research, and subagent capabilities. Only Pi's direct local-file mutation tools are removed and blocked; the system prompt forbids indirect project writes.
-6. **Branch-local persistence.** State is reconstructed from the active `SessionManager.getBranch()` path, not the last entry in the entire session tree and not a lossy compaction summary.
-7. **Pi-native UI.** The review surface uses Pi TUI components and keybindings, including its multiline editor and focus propagation for IME support.
-8. **No automatic replay.** Reloading or resuming restores planning state but never resends an execution request.
+## Branch-local records
 
-## Mode flow
+- `pi-plan-mode/artifact/v2`: immutable Markdown, SHA-256 ID, byte count. Reuse is limited to artifacts on the active branch and validated before reuse.
+- `pi-plan-mode/state/v2`: phase, revision, artifact reference, original tool baseline, capture source and optional pending handoff. No Markdown body.
+- `pi-plan-mode/handoff/v2`: approval identity and observed acceptance, not proof implementation completed.
 
-```text
-off --/plan--> planning --successful <proposed_plan> turn--> ready
- ^                 ^                       |
- |                 |--continue/feedback----|
- |                 |--direct edit----------|
- |                                         |
- +--exit without execution-----------------+
- +--explicit approval + one handoff---------+
-```
+`restore` follows the active branch only and validates hashes, bytes, schemas and pending references. v1 snapshots remain readable and migrate through new appended artifact/state entries. Orphan artifacts are not approvals. Write errors latch failure in the extension instance; re-reading in-memory state does not clear the latch. Recovery checks disk when a session file exists. This is read-back verification, not fsync or power-loss durability.
 
-`ready` means that a complete plan is awaiting a human decision. It does not mean implementation is complete.
+## Context versus disk
 
-## Tool policy
+State snapshots no longer repeat the body. The transcript still stores the original assistant plan and any handoff message. `context` pruning works on a copy, never on the transcript: only uniquely fingerprint-matched source messages have the specific captured block replaced. Preamble/postscript and non-plan messages remain unchanged. The current candidate stays in context until its matching accepted handoff is present.
 
-During `planning`, the extension preserves every tool that was active on entry except direct local-file mutation tools: `edit`, `write`, and `apply_patch`. It adds `plan_read`. The legacy `plan_submit` name remains reserved only so stale model calls can be rejected with a migration message; the tool itself is not registered.
+Signed/responseId-bearing messages, non-text blocks, unknown block metadata and ambiguous matches are retained. This is deliberately conservative and can mean **no token saving for a given Provider**, especially reasoning/signed responses. The deterministic benchmark uses unsigned text messages and does not establish production-model cost parity. Explicit `plan_read` results can also repeat the body.
 
-The `tool_call` hook blocks the three direct mutation tools even if another tool-set change exposes them again. Shell, web research, MCP, dynamic discovery, and subagent tools remain usable. The system prompt requires shell and delegated agents to stay non-mutating and read-only with respect to local project files.
+## Approval handoff
 
-This freedom is intentional, but it is not an OS sandbox: general-purpose or third-party tools can have indirect write capabilities. Strong filesystem enforcement requires running Pi in a container/VM or sandbox with the workspace mounted read-only.
+`off → planning → ready → handoff_pending → off`.
 
-## Stream capture, review, and execution transition
+A TUI review and second confirmation create a random in-process approval capability bound to revision/hash. Pending state is appended and its active disk reference chain read back before `sendUserMessage`. Its void result is not success. The extension observes matching extension-source input, then `before_agent_start` prepares the first tool snapshot while leaving pending state and the tool gate in place. Matching `message_start` for that user prompt records acceptance and off; failure restores restrictions and aborts. The real SDK fixture verifies that the first execution request sees the intended tools and no planning prompt. No tool is executed by that fixture.
 
-The transcript displays the plan through Pi's normal assistant stream. At `turn_end`, exactly one complete `<proposed_plan>` block is accepted only when the assistant stop reason is `stop`; transport errors, cancellation, incomplete tags, multiple blocks, and oversized content cannot enter `ready`. The validated Markdown is stored once in the branch-local state entry.
+Restarted pending state has no in-process capability. It never automatically dispatches or trusts pasted markers. `/plan --review` offers retry review or cancellation; `/plan --retry` reopens review, `/plan --cancel-handoff` returns to ready. Request acceptance is not exactly-once execution or completion. Trusted in-process extensions remain outside the security boundary.
 
-The complete Markdown source is scrollable. The review actions are deliberately asymmetric: continuing, feedback, editing, and cancellation are immediate safe actions; execution requires a second confirmation. After confirmation, the extension revalidates that the plan revision is unchanged, Pi is idle, and no messages are queued. It restores only the tools that were active before Plan Mode and dispatches a single message containing the complete approved plan.
+## Public API limitation: fresh execution
 
-## Recovery
+Pi 0.85.1 delays initial session disk writes until an assistant message exists (`SessionManager._persist`, implementation inspected; not called by the extension). There is no public extension flush. A new-session setup containing only artifacts/state is not a durable authorization boundary.
 
-Each relevant transition appends a versioned custom entry. Tree navigation reconstructs from the selected active branch. Reload restores the saved pre-planning tool names against the current registry; a fresh process also intersects them with its startup baseline so stricter CLI tool settings are not widened. Any recovered plan remains non-executing until the user approves it again.
+Supervisor-approved fallback: `/plan --execute-fresh` reports unavailable without creating or dispatching a session. Empty-session `/plan` remains memory-only until a genuine assistant response triggers Pi persistence. We neither fabricate assistant messages in production nor add a journal/private API. Full fresh execution and pre-first-assistant crash recovery are **not delivered**.
 
-## Sources
+## Tool drift
 
-- [OpenAI Codex CLI slash commands](https://developers.openai.com/codex/cli/slash-commands)
-- [OpenAI Codex Plan Mode prompt](https://github.com/openai/codex/blob/main/codex-rs/collaboration-mode-templates/templates/plan.md)
+The extension tracks its last applied set. Observed external changes trigger a conflict warning, intersect saved restoration permissions with the current set and do not silently restore removed tools. Approval is blocked during a conflict. Exit preserves the conservative set; explicitly reentering establishes a new baseline. This cannot detect hidden policy changes or create a host permission overlay.
+
+## Verification
+
+`npm test`: parser, origin identity, artifact deduplication, v1 migration, corrupt/sibling references, pending behavior, real disk reads in fresh processes, compaction records, UI and real SDK stream.
+
+`npm run smoke`: isolated real CLI/RPC loader, command/reload and tools (no remote model).
+
+`npm run benchmark`: 50 KiB unsigned plans, 1/5/10 revisions, three transitions per revision, actual JSONL byte sizes and context body copies. Timings are local fixture timings, not network/token/model benchmarks. The legacy fixture models v0.3 whole-state writes; its restore uses the v2 reader's v1 compatibility path.
+
+The checked SDK/TUI/AI/TypeBox/Node typings/TypeScript versions are in `verification-environment.json`. Tests are included in strict TypeScript checking. No runtime dependency was added.
+
+## References
+
+- [Pi extensions](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md)
+- [Codex Plan Mode](https://github.com/openai/codex/blob/main/codex-rs/collaboration-mode-templates/templates/plan.md)
 - [Claude Code permission modes](https://code.claude.com/docs/en/permission-modes)
-- [Pi extension documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md)
-- [Pi official Plan Mode example](https://github.com/earendil-works/pi/tree/main/packages/coding-agent/examples/extensions/plan-mode)
+
+The lifecycle and persistence decisions were verified against the local Pi 0.85.1 documentation/types/source, not assumed from a moving main branch.

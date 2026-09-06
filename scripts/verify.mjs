@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, realpathSync, symlinkSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, symlinkSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 
@@ -11,9 +11,13 @@ const links = {
   '@earendil-works/pi-coding-agent': root,
   '@earendil-works/pi-tui': join(root, 'node_modules/@earendil-works/pi-tui'),
   'typebox': join(root, 'node_modules/typebox'),
+  '@earendil-works/pi-ai': join(root, 'node_modules/@earendil-works/pi-ai'),
   '@types/node': join(root, 'node_modules/@types/node'),
 };
+const expected = JSON.parse(readFileSync('verification-environment.json', 'utf8'));
 for (const [name, target] of Object.entries(links)) {
+  const actual = JSON.parse(readFileSync(join(target, 'package.json'), 'utf8')).version;
+  if (actual !== expected[name]) throw new Error(`${name}: expected ${expected[name]}, found ${actual}; update the verified matrix intentionally`);
   const dest = resolve('node_modules', name);
   if (!existsSync(target)) throw new Error(`Missing installed dependency: ${target}`);
   mkdirSync(dirname(dest), { recursive: true });
@@ -23,9 +27,15 @@ for (const [name, target] of Object.entries(links)) {
 const task = process.argv[2];
 let command = process.execPath;
 let args;
-if (task === 'test') args = ['--experimental-transform-types', '--test', 'test/core.test.ts', 'test/ui.test.ts'];
+if (task === 'test') args = ['--experimental-transform-types', '--test', ...readdirSync('test').filter(n => n.endsWith('.test.ts')).map(n => `test/${n}`)];
 else if (task === 'smoke') args = ['scripts/smoke.mjs'];
-else if (task === 'typecheck') { command = process.env.TSC || 'tsc'; args = ['--noEmit', '-p', 'tsconfig.json']; }
+else if (task === 'benchmark') args = ['--experimental-transform-types', 'scripts/benchmark.ts'];
+else if (task === 'typecheck') {
+  command = process.env.TSC || 'tsc';
+  const version = execFileSync(command, ['--version'], { encoding: 'utf8' }).trim();
+  if (version !== `Version ${expected.typescript}`) throw new Error(`Expected TypeScript ${expected.typescript}, found ${version}`);
+  args = ['--noEmit', '-p', 'tsconfig.json'];
+}
 else throw new Error('Use test | typecheck | smoke');
 const result = spawnSync(command, args, { stdio: 'inherit', env: { ...process.env, PI_ROOT: root, PI_BIN: executable } });
 if (result.error) { console.error(result.error.message); process.exit(1); }

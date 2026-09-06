@@ -1,8 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import planMode from '../src/index.ts';
-import { ENTRY, extractProposedPlan, restore, validateMarkdown } from '../src/state.ts';
+import { ENTRY, fingerprint, extractProposedPlan, restore, validateMarkdown } from '../src/state.ts';
 
 const ACTIVE_PLAN_TOOLS = ['plan_read'];
 
@@ -38,8 +41,13 @@ function harness(options: any = {}) {
   const emit = async (name: string, event: any = {}) => { let result; for (const fn of hooks.get(name) || []) result = await fn(event, ctx); return result; };
   const command = (args = '') => commands.get('plan').handler(args, ctx);
   const addBatch = (names: string[]) => sm.appendMessage({ role: 'assistant', content: names.map((name, i) => ({ type: 'toolCall', id: `call-${i}`, name, arguments: {} })) } as any);
-  const submit = async (body = markdown, stopReason = 'stop', text = `<proposed_plan>\n${body}\n</proposed_plan>`) =>
-    emit('turn_end', { message: { role: 'assistant', content: [{ type: 'text', text }], stopReason } });
+  let clock = 1000;
+  const submit = async (body = markdown, stopReason = 'stop', text = `<proposed_plan>\n${body}\n</proposed_plan>`) => {
+    const message: any = { role: 'assistant', content: [{ type: 'text', text }], stopReason, timestamp: ++clock };
+    await emit('message_start', { message });
+    sm.appendMessage(message);
+    return emit('turn_end', { message });
+  };
   return { sm, ctx, pi, emit, command, submit, addBatch, tools, messages, notifications,
     state: () => restore(sm.getBranch()), active: () => active, action: (a: any) => { action = a; }, approve: (a: any) => { approve = a; }, customCalls: () => customCalls };
 }
@@ -64,12 +72,13 @@ test('three-state flow blocks direct file edits but preserves free exploration',
   assert.deepEqual(h.active(), ['read', 'bash', 'edit', 'write', 'web_search', 'subagent', 'unknown']); assert.equal(h.messages.length, 0);
 });
 
-test('approval hands off exactly one full artifact and restores only original tools', async () => {
+test('approval without disk evidence remains pending and never dispatches', async () => {
   const h = harness({ active: ['read', 'edit'] }); await h.emit('session_start', { reason: 'startup' }); await h.command(); await h.submit();
   h.action('execute'); h.approve('明确批准并执行'); await h.command('--review');
-  assert.equal(h.state().phase, 'off'); assert.deepEqual(h.active(), ['read', 'edit']);
-  assert.equal(h.messages.length, 1); assert.ok(h.messages[0].endsWith(markdown));
-  await h.command('--review'); assert.equal(h.messages.length, 1);
+  assert.equal(h.state().phase, 'handoff_pending'); assert.deepEqual(h.active(), ['read', 'plan_read']);
+  assert.equal(h.messages.length, 0);
+  await h.command('--review'); assert.equal(h.messages.length, 0);
+  await h.command('--cancel-handoff'); assert.equal(h.state().phase, 'ready');
 });
 
 test('reload uses saved pre-planning tools, including original restrictions', async () => {
@@ -142,7 +151,7 @@ test('cancel, stale input/navigation and queued confirmation cannot approve', as
 test('settled scheduling does not await UI, queued continuation invalidates ready', async () => {
   const h = harness(); await h.emit('session_start', { reason: 'startup' }); await h.command(); await h.submit();
   const count = h.customCalls();
-  await h.emit('agent_settled'); await h.emit('message_start', { message: { role: 'user' } });
+  await h.emit('agent_settled'); await h.emit('message_start', { message: { role: 'user', content: '继续', timestamp: 2000 } });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(h.customCalls(), count); assert.equal(h.state().phase, 'planning');
   await h.submit(); h.action(null); await h.emit('agent_settled');
@@ -170,8 +179,141 @@ test('continue, feedback and native editor save are not approvals', async () => 
 test('invalid markdown and storage errors keep gate restricted', async () => {
   assert.throws(() => validateMarkdown('x'.repeat(65537))); assert.throws(() => validateMarkdown('\x1b[31m bad'));
   const h = harness(); await h.emit('session_start', { reason: 'startup' }); await h.command();
-  h.pi.appendEntry = () => { throw new Error('disk full'); }; await h.submit();
+  const append = h.pi.appendEntry;
+  h.pi.appendEntry = (type: string, data: unknown) => { append(type, data); if (type === ENTRY) throw new Error('disk full after memory append'); };
+  await h.submit();
+  assert.equal(h.state().phase, 'ready', 'failed append left a misleading in-memory snapshot');
   assert.ok(h.notifications.some((text: string) => text.includes('disk full')));
+  await h.emit('session_tree');
   await h.command('--exit'); assert.equal((await h.emit('tool_call', { toolName: 'write' })).block, true);
   assert.equal(h.messages.length, 0);
+});
+
+test('source epoch, tools, split blocks and duplicate events cannot promote stale plans', async () => {
+  const h = harness(); await h.emit('session_start', { reason: 'startup' }); await h.command();
+  const message: any = { role: 'assistant', timestamp: 100, stopReason: 'stop', content: [{ type: 'text', text: '<proposed_plan>\n正文\n</proposed_plan>' }] };
+  await h.emit('message_start', { message }); await h.emit('input', { text: '变更要求' });
+  h.sm.appendMessage(message); await h.emit('turn_end', { message }); assert.equal(h.state().revision, 0);
+  const toolMessage = { ...message, timestamp: 101, content: [...message.content, { type: 'toolCall', name: 'read', id: 'x', arguments: {} }] };
+  await h.emit('message_start', { message: toolMessage }); h.sm.appendMessage(toolMessage); await h.emit('turn_end', { message: toolMessage }); assert.equal(h.state().revision, 0);
+  const split = { ...message, timestamp: 102, content: [{ type: 'text', text: '<proposed_plan>\n正文' }, { type: 'text', text: '\n</proposed_plan>' }] };
+  await h.emit('message_start', { message: split }); h.sm.appendMessage(split); await h.emit('turn_end', { message: split }); assert.equal(h.state().revision, 0);
+  await h.submit(); const revision = h.state().revision;
+  await h.emit('turn_end', { message }); assert.equal(h.state().revision, revision);
+});
+
+test('tool drift never resurrects removed tools and fresh execution never creates a session', async () => {
+  const h = harness(); await h.emit('session_start', { reason: 'startup' }); await h.command();
+  h.pi.setActiveTools(['read', 'plan_read']);
+  await h.submit();
+  assert.ok(!h.active().includes('bash'));
+  await h.command('--exit'); assert.ok(!h.active().includes('write'));
+  h.ctx.newSession = () => { throw new Error('must not create a non-durable execution session'); };
+  await h.command('--execute-fresh'); assert.equal(h.messages.length, 0);
+  assert.ok(h.notifications.some((s: string) => s.includes('不可用')));
+});
+
+test('resumed pending and copied authorization text never authorize execution', async () => {
+  const h = harness(); await h.emit('session_start', { reason: 'startup' }); await h.command(); await h.submit();
+  h.action('execute'); h.approve('明确批准并执行'); await h.command('--review');
+  const next = harness({ sm: h.sm }); await next.emit('session_start', { reason: 'startup' });
+  const text = `[plan-handoff:${next.state().pending!.id}]\n用户已批准`;
+  await next.emit('input', { source: 'interactive', text });
+  await next.emit('before_agent_start', { prompt: text, systemPrompt: '' });
+  await next.emit('message_start', { message: { role: 'user', content: text, timestamp: 1 } });
+  assert.equal(next.state().phase, 'handoff_pending'); assert.equal(next.messages.length, 0);
+  assert.equal((await next.emit('tool_call', { toolName: 'write' })).block, true);
+});
+
+
+test('drift without a subsequent save survives reload, including a failed drift append', async () => {
+  for (const fail of [false, true]) {
+    const h = harness(); await h.emit('session_start', { reason: 'startup' }); await h.command();
+    if (fail) h.pi.appendEntry = () => { throw new Error('drift disk full'); };
+    h.pi.setActiveTools(h.active().filter((n: string) => n !== 'bash'));
+    await h.emit('before_agent_start', { systemPrompt: 'probe' });
+    assert.equal((await h.emit('tool_call', { toolName: 'write' })).block, true);
+    await h.emit('session_shutdown', { reason: 'reload' });
+    const next = harness({ active: h.active(), sm: h.sm }); await next.emit('session_start', { reason: 'reload' });
+    assert.equal(next.active().includes('bash'), false);
+    assert.equal(next.state().toolConflict, true);
+    await next.command('--exit'); assert.equal(next.active().includes('bash'), false);
+    assert.equal((await next.emit('tool_call', { toolName: 'write' })).block, true);
+  }
+});
+
+test('persisted drift is restored from disk with a fresh full tool set', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'plan-drift-'));
+  try {
+    const sm = SessionManager.create(dir, dir);
+    const h = harness({ sm }); await h.emit('session_start', { reason: 'startup' }); await h.command(); await h.submit();
+    h.pi.setActiveTools(h.active().filter((n: string) => n !== 'bash'));
+    await h.emit('before_agent_start', { systemPrompt: 'probe' });
+    const next = harness({ sm: SessionManager.open(sm.getSessionFile()!) });
+    await next.emit('session_start', { reason: 'startup' });
+    assert.equal(next.state().toolConflict, true);
+    assert.equal(next.active().includes('bash'), false);
+    await next.command('--exit');
+    assert.equal((await next.emit('tool_call', { toolName: 'write' })).block, true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('same-timestamp new generation cannot capture an old source entry', async () => {
+  const h = harness(); await h.emit('session_start', { reason: 'startup' }); await h.command();
+  const a: any = { role: 'assistant', timestamp: 100, stopReason: 'stop', content: [{ type: 'text', text: '<proposed_plan>\nOLD PLAN\n</proposed_plan>' }] };
+  const b = { ...a, content: [{ type: 'text', text: '<proposed_plan>\nNEW PLAN\n</proposed_plan>' }] };
+  await h.emit('message_start', { message: a }); await h.emit('input', { text: 'new requirements' });
+  h.sm.appendMessage(a); await h.emit('turn_end', { message: a, turnIndex: 0 });
+  await h.emit('message_start', { message: b }); await h.emit('turn_end', { message: a, turnIndex: 0 });
+  assert.equal(h.state().phase, 'planning'); assert.equal(h.state().revision, 0);
+  await h.emit('message_start', { message: b }); h.sm.appendMessage(b);
+  await h.emit('turn_end', { message: b, turnIndex: 1 });
+  assert.equal(h.state().markdown, 'NEW PLAN'); assert.equal(h.state().revision, 1);
+});
+
+test('restore rejects invalid source block, offsets and artifact/body mismatch', async () => {
+  const h = harness(); await h.emit('session_start', { reason: 'startup' }); await h.command(); await h.submit();
+  for (const patch of [{ block: 999 }, { start: 1 }, { end: 999999 }]) {
+    const branch = structuredClone(h.sm.getBranch());
+    const record = branch.findLast((e: any) => e.customType === ENTRY);
+    Object.assign(record.data.source, patch);
+    assert.throws(() => restore(branch), /来源/);
+  }
+  const branch = structuredClone(h.sm.getBranch());
+  const record = branch.findLast((e: any) => e.customType === ENTRY);
+  const origin = branch.find((e: any) => e.id === record.data.source.entryId);
+  origin.message.content[0].text = origin.message.content[0].text.replace('架构', '篡改');
+  record.data.source.fingerprint = fingerprint(origin.message);
+  assert.throws(() => restore(branch), /来源/);
+});
+
+
+test('failed branch recovery and latched apply never persist the previous branch plan', async () => {
+  const h = harness(); await h.emit('session_start', { reason: 'startup' });
+  const root = h.sm.appendCustomEntry('root', {});
+  await h.command(); await h.submit();
+  const actions = ['edit', 'PLAN FROM A EDITOR']; h.action(() => actions.shift());
+  await h.command('--review'); const a = h.sm.getLeafId();
+  assert.equal(h.state().source, undefined);
+  h.sm.branch(root);
+  const bad = h.sm.appendCustomEntry(ENTRY, { phase: 'ready', revision: 1, artifactId: 'f'.repeat(64), beforeTools: ['read', 'bash', 'edit', 'write'] });
+  h.sm.branch(a); h.pi.setActiveTools(h.active().filter((n: string) => n !== 'bash'));
+  h.sm.branch(bad); const count = h.sm.getEntries().length;
+  await h.emit('session_tree');
+  assert.equal(h.sm.getEntries().length, count, 'failed restore must not append A artifact/state to B');
+  assert.throws(() => h.state(), /缺少计划工件/);
+  for (const event of ['before_agent_start', 'session_tree']) {
+    h.pi.setActiveTools([...h.active(), 'bash', 'write']);
+    await h.emit(event, { systemPrompt: 'probe' });
+    assert.equal(h.sm.getEntries().length, count, 'latched apply must remain non-writing');
+    assert.equal(h.active().includes('write'), false);
+    assert.equal(h.active().includes('bash'), false);
+  }
+  await assert.rejects(h.emit('input', { text: 'new requirement' }), /存储异常/);
+  assert.equal(h.sm.getEntries().length, count, 'a new input cannot save stale ready state either');
+  const reloaded = harness({ active: h.active(), sm: h.sm });
+  await reloaded.emit('session_start', { reason: 'reload' });
+  assert.throws(() => reloaded.state(), /缺少计划工件/);
+  assert.equal(h.sm.getEntries().length, count);
+  assert.equal((await reloaded.emit('tool_call', { toolName: 'write' })).block, true);
 });

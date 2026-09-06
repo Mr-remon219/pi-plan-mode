@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0 — 2026-09-06
+
+- Separate SHA-256 plan artifacts from branch-local state; migrate v1 snapshots append-only.
+- Bind strict fence-aware plan capture to message identity, generation epoch and revision.
+- Prune only uniquely matched unsigned historical plan blocks on context copies; preserve signatures and ambiguous messages.
+- Persist and read back pending authorization before dispatch; observe real input/start lifecycle rather than treating void dispatch as success.
+- Keep recovered pending handoffs non-executing, expose retry/cancel review and diagnose tool-set drift.
+- Explicitly disable fresh-context execution where Pi cannot durably initialize the new session; no private flush or synthetic assistant workaround.
+- Add deterministic SDK lifecycle, multi-process disk restore, parser/context tests, strict test typechecking and storage/context benchmark.
+
 ## 0.3.0 — 2026-09-06
 
 - Stream final plans as ordinary assistant `<proposed_plan>` Markdown instead of a large `plan_submit` tool argument.

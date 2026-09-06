@@ -42,7 +42,7 @@ try {
   const originalTools = initial.data.entries.findLast(entry => entry.customType === 'plan-smoke-tools').data;
   result = await request('prompt', { message: '/plan' }); assert.equal(result.success, true);
   result = await request('get_entries');
-  assert.equal(result.data.entries.findLast(entry => entry.customType === 'pi-plan-mode/v1').data.phase, 'planning');
+  assert.equal(result.data.entries.findLast(entry => entry.customType === 'pi-plan-mode/state/v2').data.phase, 'planning');
   await request('prompt', { message: '/plan-smoke-tools' });
   result = await request('get_entries');
   const planningTools = result.data.entries.findLast(entry => entry.customType === 'plan-smoke-tools').data;
@@ -55,7 +55,7 @@ try {
   await request('prompt', { message: '/plan-smoke-tools' });
   result = await request('get_entries');
   assert.deepEqual(result.data.entries.findLast(entry => entry.customType === 'plan-smoke-tools').data, originalTools);
-  result = await request('get_entries'); assert.equal(result.data.entries.findLast(entry => entry.customType === 'pi-plan-mode/v1').data.phase, 'off');
+  result = await request('get_entries'); assert.equal(result.data.entries.findLast(entry => entry.customType === 'pi-plan-mode/state/v2').data.phase, 'off');
   assert.ok(!events.some(event => event.type === 'agent_start' || event.type === 'extension_error'));
   console.log('PASS: Pi real CLI loader + RPC command/state + free shell exploration + direct edit tools removed + real reload→exit exact tool restoration; zero agent_start or extension_error.');
 } finally {
