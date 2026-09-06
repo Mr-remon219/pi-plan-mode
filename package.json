@@ -1,8 +1,8 @@
 {
   "name": "@mr_remon/pi-plan-mode",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "description": "Native Plan Mode for Pi: read-only exploration, full Markdown plan review, and explicit approval before execution.",
+  "description": "Native Plan Mode for Pi with unrestricted exploration, full Markdown review, and explicit approval before local file edits.",
   "license": "MIT",
   "author": "Mr-remon219",
   "homepage": "https://github.com/Mr-remon219/pi-plan-mode#readme",

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0 — 2026-09-06
+
+- Replace the restrictive planning-tool allowlist with an exploration-first policy.
+- Preserve shell, web research, MCP, search, subagent, and other extension tools in Plan Mode.
+- Block only Pi's direct local-file mutation tools: `edit`, `write`, and `apply_patch`.
+- Keep non-mutating shell exploration available and document the OS-sandbox boundary honestly.
+
 ## 0.1.0 — 2026-09-06
 
 - Initial public release.

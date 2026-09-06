@@ -1,7 +1,8 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
 export const ENTRY = "pi-plan-mode/v1";
-export const OWN_TOOLS = ["plan_read_file", "plan_ls", "plan_grep", "plan_find", "plan_read", "plan_submit"];
+export const OWN_TOOLS = ["plan_read", "plan_submit"];
+export const LOCAL_FILE_MUTATION_TOOLS = new Set(["edit", "write", "apply_patch"]);
 export interface PlanState {
   phase: "off" | "planning" | "ready";
   revision: number;

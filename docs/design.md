@@ -14,7 +14,7 @@ This extension adapts those ideas to Pi rather than copying another client's per
 2. **State is authoritative.** `off`, `planning`, and `ready` are explicit extension states. Assistant prose and todo markers do not change modes.
 3. **The plan is an artifact.** `plan_submit` stores complete Markdown with a revision. The UI never reconstructs a plan from numbered-list regexes.
 4. **The host owns approval.** The model has no exit or approve tool. Only the user-facing TUI can approve execution.
-5. **Defense in depth.** Restricted active tools shape the model's choices; the `tool_call` hook enforces the boundary. Unknown tools and shell execution are denied while planning.
+5. **Exploration-first policy.** Plan Mode keeps existing shell, web, MCP, research, and subagent capabilities. Only Pi's direct local-file mutation tools are removed and blocked; the system prompt forbids indirect project writes.
 6. **Branch-local persistence.** State is reconstructed from the active `SessionManager.getBranch()` path, not the last entry in the entire session tree and not a lossy compaction summary.
 7. **Pi-native UI.** The review surface uses Pi TUI components and keybindings, including its multiline editor and focus propagation for IME support.
 8. **No automatic replay.** Reloading or resuming restores planning state but never resends an execution request.
@@ -35,11 +35,11 @@ off --/plan--> planning --plan_submit--> ready
 
 ## Tool policy
 
-During `planning`, only dedicated wrappers around Pi's read, list, grep, and find definitions plus `plan_read` and `plan_submit` are active. In `ready`, only `plan_read` remains usable. A `tool_call` hook blocks everything else, including shell, writes, dynamic tool loaders, and subagent tools.
+During `planning`, the extension preserves every tool that was active on entry except direct local-file mutation tools: `edit`, `write`, and `apply_patch`. It adds `plan_read` and `plan_submit`. In `ready`, exploration remains available and only `plan_submit` is removed.
 
-The wrappers bind Pi's own tool definitions directly instead of invoking a potentially overridden built-in tool name. They preserve Pi's normal truncation, cancellation, ignore, cache, and support-tool behavior.
+The `tool_call` hook blocks the three direct mutation tools even if another tool-set change exposes them again. Shell, web research, MCP, dynamic discovery, and subagent tools remain usable. The system prompt requires shell and delegated agents to stay non-mutating and read-only with respect to local project files.
 
-This is not an OS sandbox. Trusted peer extensions and host code execute in the same process and remain outside this extension's isolation boundary.
+This freedom is intentional, but it is not an OS sandbox: general-purpose or third-party tools can have indirect write capabilities. Strong filesystem enforcement requires running Pi in a container/VM or sandbox with the workspace mounted read-only.
 
 ## Review and execution transition
 

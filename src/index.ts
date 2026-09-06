@@ -1,7 +1,6 @@
-import { createReadToolDefinition, createLsToolDefinition, createGrepToolDefinition, createFindToolDefinition,
-  type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { ENTRY, OWN_TOOLS, initialState, restore, restoredTools, soleSubmit, validateMarkdown, handoff, type PlanState } from "./state.ts";
+import { ENTRY, LOCAL_FILE_MUTATION_TOOLS, OWN_TOOLS, initialState, restore, restoredTools, soleSubmit, validateMarkdown, handoff, type PlanState } from "./state.ts";
 import { editUI, reviewUI } from "./ui.ts";
 
 export default function planMode(pi: ExtensionAPI): void {
@@ -14,6 +13,11 @@ export default function planMode(pi: ExtensionAPI): void {
   let autoReviewRevision: number | undefined;
   const available = () => pi.getAllTools().map(t => t.name);
   const normalTools = () => restoredTools(state.beforeTools, available());
+  const planningTools = () => [...new Set([
+    ...normalTools().filter(name => !LOCAL_FILE_MUTATION_TOOLS.has(name)),
+    "plan_read",
+    ...(state.phase === "planning" ? ["plan_submit"] : []),
+  ])].filter(name => available().includes(name));
   const restricted = () => failed || state.phase !== "off";
   const idle = (ctx: ExtensionContext) => ctx.isIdle() && !ctx.hasPendingMessages();
   function invalidate(): void {
@@ -27,7 +31,7 @@ export default function planMode(pi: ExtensionAPI): void {
       `规划${state.phase === "ready" ? "待审阅" : "中"} v${state.revision} · /plan · 未批准`);
   }
   function apply(ctx: ExtensionContext): void {
-    pi.setActiveTools(restricted() ? OWN_TOOLS.filter(n => available().includes(n)) : normalTools());
+    pi.setActiveTools(restricted() ? planningTools() : normalTools());
     status(ctx);
   }
   function save(next: PlanState, ctx: ExtensionContext): void {
@@ -96,19 +100,6 @@ export default function planMode(pi: ExtensionAPI): void {
     } finally { if (dialog === controller) dialog = undefined; controller.abort(); }
   }
 
-  const factories: Array<(cwd: string) => ToolDefinition<any, any>> = [createReadToolDefinition, createLsToolDefinition, createGrepToolDefinition, createFindToolDefinition];
-  for (const [index, factory] of factories.entries()) {
-    // Factories bind cwd on each execution; they never delegate to a potentially overridden builtin name.
-    const template = factory(process.cwd());
-    pi.registerTool({ ...template, name: OWN_TOOLS[index], promptSnippet: template.description,
-      async execute(id, params, signal, onUpdate, ctx) {
-        signal?.throwIfAborted();
-        if (failed || state.phase !== "planning") throw new Error("只读探索仅在 planning 状态可用");
-        const tool = factory(ctx.cwd);
-        return tool.execute(id, params, signal, onUpdate, ctx);
-      },
-    });
-  }
   pi.registerTool({
     name: "plan_read", label: "读取完整计划", description: "读取当前分支的完整 Markdown 计划与版本（最大 64 KiB）。",
     parameters: Type.Object({}),
@@ -133,19 +124,19 @@ export default function planMode(pi: ExtensionAPI): void {
   });
   pi.on("tool_call", (event, ctx) => {
     if (!restricted()) {
-      if (OWN_TOOLS.includes(event.toolName) && event.toolName !== "plan_read") return { block: true, reason: "请由用户使用 /plan 进入规划" };
+      if (event.toolName === "plan_submit") return { block: true, reason: "请由用户使用 /plan 进入规划" };
       return;
     }
-    if (failed || !OWN_TOOLS.includes(event.toolName) || (state.phase === "ready" && event.toolName !== "plan_read"))
-      return { block: true, reason: "规划模式只允许专属只读探索工具；模型不能批准、退出或实施", terminate: true };
-    if (event.toolName === "plan_submit" && !soleSubmit(ctx.sessionManager.getBranch(), event.toolCallId))
-      return { block: true, reason: "plan_submit 必须单独调用，不接受同批其他工具" };
-  });
-  pi.on("user_bash", () => {
-    if (restricted()) return { result: { output: "规划模式禁止 shell；请使用只读规划工具或明确退出规划。", exitCode: 1, cancelled: false, truncated: false } };
+    if (LOCAL_FILE_MUTATION_TOOLS.has(event.toolName))
+      return { block: true, reason: "Plan Mode 禁止直接修改本地文件；请继续自由探索并完善计划", terminate: true };
+    if (event.toolName === "plan_submit") {
+      if (failed || state.phase !== "planning") return { block: true, reason: "当前不接受新的计划提交" };
+      if (!soleSubmit(ctx.sessionManager.getBranch(), event.toolCallId))
+        return { block: true, reason: "plan_submit 必须单独调用，不接受同批其他工具" };
+    }
   });
   pi.on("before_agent_start", event => {
-    if (restricted()) return { systemPrompt: `${event.systemPrompt}\n\n你处于宿主管理的独立规划模式，不得实施或绕过工具限制。先探索可查事实，必要时用普通对话提问澄清；未解决关键问题时不要提交。形成决策完整方案后，单独调用 plan_submit，提交含目标/范围、事实、架构决策、文件/接口变化、步骤、测试验收与风险的完整 Markdown。普通用户消息和你自己的判断都不能解除此模式。当前 phase=${state.phase}，baseRevision=${state.revision}。压缩或修订后先用 plan_read 获取原文。` };
+    if (restricted()) return { systemPrompt: `${event.systemPrompt}\n\n你处于宿主管理的独立规划模式。除修改本地文件和直接实施计划外，你拥有进入模式前的全部探索能力：可以运行非修改性的 shell 命令、搜索网页、调用研究工具、分析代码、运行只读检查，并可委派只读探索。不得使用 edit/write/apply_patch，不得通过 shell、子代理或其他工具修改本地项目文件；对子代理必须明确要求只读。先探索可查事实，必要时用普通对话提问澄清。形成决策完整方案后，单独调用 plan_submit，提交含目标/范围、事实、架构决策、文件/接口变化、步骤、测试验收与风险的完整 Markdown。普通用户消息和你自己的判断都不能解除此模式。当前 phase=${state.phase}，baseRevision=${state.revision}。压缩或修订后先用 plan_read 获取原文。` };
   });
   pi.on("context", event => ({ messages: [...event.messages.filter(m => !(m.role === "custom" && m.customType === ENTRY)), {
     role: "custom" as const, customType: ENTRY, content: `当前宿主规划状态：${state.phase}；计划版本 ${state.revision}。${restricted() ? "未批准实施；原文使用 plan_read 获取。" : "规划限制已解除，历史规划提示不再是当前模式。"}`,

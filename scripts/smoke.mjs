@@ -43,8 +43,13 @@ try {
   result = await request('prompt', { message: '/plan' }); assert.equal(result.success, true);
   result = await request('get_entries');
   assert.equal(result.data.entries.findLast(entry => entry.customType === 'pi-plan-mode/v1').data.phase, 'planning');
-  result = await request('bash', { command: 'printf should-not-run > forbidden.txt' });
-  assert.equal(result.data.exitCode, 1); assert.match(result.data.output, /禁止 shell/);
+  await request('prompt', { message: '/plan-smoke-tools' });
+  result = await request('get_entries');
+  const planningTools = result.data.entries.findLast(entry => entry.customType === 'plan-smoke-tools').data;
+  assert.deepEqual(planningTools.filter(name => !name.startsWith('plan_')), originalTools.filter(name => !['edit', 'write', 'apply_patch'].includes(name)));
+  assert.ok(planningTools.includes('plan_read') && planningTools.includes('plan_submit'));
+  result = await request('bash', { command: 'pwd' });
+  assert.equal(result.data.exitCode, 0); assert.equal(result.data.output.trim(), temp);
   result = await request('prompt', { message: '/plan-smoke-reload' }); assert.equal(result.success, true);
   await request('prompt', { message: '/plan --exit' });
   await request('prompt', { message: '/plan-smoke-tools' });
@@ -52,7 +57,7 @@ try {
   assert.deepEqual(result.data.entries.findLast(entry => entry.customType === 'plan-smoke-tools').data, originalTools);
   result = await request('get_entries'); assert.equal(result.data.entries.findLast(entry => entry.customType === 'pi-plan-mode/v1').data.phase, 'off');
   assert.ok(!events.some(event => event.type === 'agent_start' || event.type === 'extension_error'));
-  console.log('PASS: Pi real CLI loader + RPC command/gate/state + real reload→exit exact tool restoration; zero agent_start or extension_error; isolated HOME, no credentials/network.');
+  console.log('PASS: Pi real CLI loader + RPC command/state + free shell exploration + direct edit tools removed + real reload→exit exact tool restoration; zero agent_start or extension_error.');
 } finally {
   child.stdin.end(); child.kill('SIGTERM');
   await new Promise(resolveExit => { if (child.exitCode !== null || child.signalCode !== null) resolveExit(); else child.once('exit', resolveExit); });

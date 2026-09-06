@@ -7,7 +7,7 @@ Pi 原生、独立、有状态的 `/plan` 规划模式。它不是“少开几�
 ## Features
 
 - **Independent state** — `off → planning → ready`, persisted on the active Pi session branch.
-- **Read-only planning tools** — dedicated read/list/grep/find tools; shell, editing, subagents, and unknown tools are blocked while planning.
+- **Free exploration** — keeps your existing shell, web research, search, MCP, and subagent tools available while planning.
 - **Complete plan artifact** — the model submits full Markdown through `plan_submit`; no lossy step extraction.
 - **Native TUI review** — scroll the full plan, continue planning, send feedback, edit the plan directly, exit without executing, or approve execution.
 - **Explicit approval** — the model cannot approve its own plan. Cancellation never executes.
@@ -64,8 +64,8 @@ Approval requires a second explicit confirmation. Pi then restores the tools tha
 The extension combines three Pi-native controls:
 
 1. A planning system-prompt injection that defines planning behavior.
-2. A restricted active tool set for model affordance.
-3. A `tool_call` gate that rejects shell, writes, subagents, unknown tools, and model-driven mode changes.
+2. The existing tool set, minus Pi's direct local-file mutation tools (`edit`, `write`, and `apply_patch`).
+3. A `tool_call` gate that blocks those direct file-editing tools while leaving shell, web, research, MCP, subagent, and unknown extension tools available.
 
 State and full Markdown are stored in versioned `CustomEntry` records and reconstructed with `SessionManager.getBranch()`. Compaction summaries and abandoned branches are not treated as authoritative state.
 
@@ -73,9 +73,9 @@ The plan body is limited to 64 KiB and is rejected rather than silently truncate
 
 ## Security model
 
-This extension enforces an **agent tool boundary**, not an operating-system sandbox.
+This extension deliberately favors exploration freedom over a restrictive allowlist. It hard-blocks Pi's direct `edit`, `write`, and `apply_patch` tools. The planning prompt also forbids modifying local project files through shell, subagents, or other tools while allowing non-mutating shell commands, tests, web research, and delegated read-only exploration.
 
-It prevents the active model from implementing changes through Pi tools while Plan Mode is active. It does not isolate trusted in-process extensions, other slash commands, SDK host code, or commands run in another terminal. Pi may still write session data, caches, and search-tool support files.
+This is **not an operating-system sandbox**. Shell and third-party tools are general-purpose capabilities, so a malicious or disobedient model could still find an indirect write path. Use an OS/container sandbox with a read-only workspace when filesystem-level enforcement is required. Trusted in-process extensions, other slash commands, SDK host code, and external terminals are outside this extension's boundary. Pi may write session data, caches, build artifacts, and search-tool support files.
 
 If persistent state cannot be written, the extension fails closed for the current process and does not automatically restore implementation tools.
 
@@ -96,7 +96,7 @@ npm test
 npm run smoke
 ```
 
-The verification script resolves the SDK from an existing Pi installation; it does not run `npm install` or `npx`. The test suite contains 18 focused tests. The smoke test launches the real Pi CLI in isolated RPC mode and validates extension loading, `/plan`, shell blocking, reload, and exact tool restoration.
+The verification script resolves the SDK from an existing Pi installation; it does not run `npm install` or `npx`. The test suite contains 18 focused tests. The smoke test launches the real Pi CLI in isolated RPC mode and validates extension loading, `/plan`, free shell exploration, removal of direct edit tools, reload, and exact tool restoration.
 
 See [docs/design.md](docs/design.md) for the researched design and architecture decisions.
 
@@ -105,6 +105,7 @@ See [docs/design.md](docs/design.md) for the researched design and architecture 
 - The review panel shows lossless Markdown source rather than a rich rendered preview.
 - No production-model end-to-end test is included.
 - Desktop IME behavior relies on Pi's native editor and has automated focus/paste coverage, but no manual cross-terminal certification.
+- Shell and third-party tools are intentionally available; the prompt forbids local project writes through them, but strong enforcement requires a read-only OS/container mount.
 - Multiple extensions that independently replace Pi's active tool set are not supported together.
 
 ## License

@@ -1,8 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import planMode from '../src/index.ts';
 import { ENTRY, OWN_TOOLS, restore, validateMarkdown } from '../src/state.ts';
@@ -28,7 +25,7 @@ function harness(options: any = {}) {
     },
   };
   const pi: any = {
-    getActiveTools: () => [...active], getAllTools: () => [...new Set(['read', 'bash', 'edit', 'write', 'unknown', ...tools.keys()])].map(name => ({ name })),
+    getActiveTools: () => [...active], getAllTools: () => [...new Set([...active, 'read', 'bash', 'edit', 'write', 'unknown', ...tools.keys()])].map(name => ({ name })),
     setActiveTools: (names: string[]) => { active = [...names]; },
     appendEntry: (type: string, data: any) => sm.appendCustomEntry(type, structuredClone(data)),
     sendUserMessage: (text: string) => messages.push(text),
@@ -44,18 +41,24 @@ function harness(options: any = {}) {
     state: () => restore(sm.getBranch()), active: () => active, action: (a: any) => { action = a; }, approve: (a: any) => { approve = a; }, customCalls: () => customCalls };
 }
 
-test('three-state flow, unknown mutation gate, no agent approval, exit sends nothing', async () => {
-  const h = harness(); await h.emit('session_start', { reason: 'startup' }); await h.command();
-  assert.equal(h.state().phase, 'planning'); assert.deepEqual(h.active(), OWN_TOOLS);
-  for (const toolName of ['write', 'edit', 'bash', 'powershell', 'unknown', 'delegate', 'approve_plan', 'plan_execute']) {
+test('three-state flow blocks direct file edits but preserves free exploration', async () => {
+  const h = harness({ active: ['read', 'bash', 'edit', 'write', 'web_search', 'subagent', 'unknown'] });
+  await h.emit('session_start', { reason: 'startup' }); await h.command();
+  assert.equal(h.state().phase, 'planning');
+  assert.deepEqual(h.active(), ['read', 'bash', 'web_search', 'subagent', 'unknown', ...OWN_TOOLS]);
+  for (const toolName of ['write', 'edit', 'apply_patch']) {
     assert.equal((await h.emit('tool_call', { toolName, input: {} })).block, true);
   }
-  assert.equal((await h.emit('user_bash')).result.exitCode, 1);
+  for (const toolName of ['bash', 'powershell', 'unknown', 'subagent', 'web_search']) {
+    assert.equal(await h.emit('tool_call', { toolName, input: {} }), undefined);
+  }
+  assert.equal(await h.emit('user_bash'), undefined);
   const result = await h.submit(); assert.equal(result.terminate, true); assert.equal(h.state().markdown, markdown);
-  assert.equal(h.state().phase, 'ready'); assert.equal(h.messages.length, 0);
+  assert.equal(h.state().phase, 'ready'); assert.deepEqual(h.active(), ['read', 'bash', 'web_search', 'subagent', 'unknown', 'plan_read']);
+  assert.equal(h.messages.length, 0);
   await h.command('--execute'); assert.equal(h.messages.length, 0);
   await h.command('--exit'); assert.equal(h.state().phase, 'off');
-  assert.deepEqual(h.active(), ['read', 'bash', 'edit', 'write']); assert.equal(h.messages.length, 0);
+  assert.deepEqual(h.active(), ['read', 'bash', 'edit', 'write', 'web_search', 'subagent', 'unknown']); assert.equal(h.messages.length, 0);
 });
 
 test('approval hands off exactly one full artifact and restores only original tools', async () => {
@@ -76,16 +79,13 @@ test('reload uses saved pre-planning tools, including original restrictions', as
   }
 });
 
-test('real read factory reads only, supports cancellation, and never delegates to builtin overrides', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'plan-read-'));
-  try {
-    const file = join(dir, 'source.txt'); await writeFile(file, '只读测试正文');
-    const h = harness(); h.ctx.cwd = dir; await h.emit('session_start', { reason: 'startup' }); await h.command();
-    const tool = h.tools.get('plan_read_file');
-    const result = await tool.execute('read-id', { path: 'source.txt' }, undefined, undefined, h.ctx);
-    assert.equal(result.content[0].text, '只读测试正文'); assert.equal(await readFile(file, 'utf8'), '只读测试正文');
-    await assert.rejects(tool.execute('read-id', { path: file }, AbortSignal.abort(), undefined, h.ctx));
-  } finally { await rm(dir, { recursive: true, force: true }); }
+test('all original non-editing capabilities remain active during planning', async () => {
+  const original = ['read', 'bash', 'web_search', 'fetch_page', 'subagent', 'custom_research', 'edit', 'write'];
+  const h = harness({ active: original }); await h.emit('session_start', { reason: 'startup' }); await h.command();
+  assert.deepEqual(h.active(), ['read', 'bash', 'web_search', 'fetch_page', 'subagent', 'custom_research', ...OWN_TOOLS]);
+  await h.submit();
+  assert.deepEqual(h.active(), ['read', 'bash', 'web_search', 'fetch_page', 'subagent', 'custom_research', 'plan_read']);
+  await h.command('--exit'); assert.deepEqual(h.active(), original);
 });
 
 test('fresh startup respects stricter baseline through a later reload', async () => {
@@ -102,12 +102,12 @@ test('active branch restoration ignores compaction summaries and other branches'
   h.sm.appendCompaction('approved OTHER PLAN', ready, 1000);
   assert.equal(restore(h.sm.getBranch()).markdown, markdown);
   h.sm.branch(root); await h.emit('session_tree'); assert.equal(h.active().includes('write'), true); assert.equal(restore(h.sm.getBranch()).phase, 'off');
-  h.sm.branch(ready); await h.emit('session_tree'); assert.deepEqual(h.active(), OWN_TOOLS); assert.equal(h.messages.length, 0);
+  h.sm.branch(ready); await h.emit('session_tree'); assert.deepEqual(h.active(), ['read', 'bash', 'plan_read']); assert.equal(h.messages.length, 0);
 });
 
 test('same-batch submit fails, cancelled submit never persists', async () => {
   const h = harness(); await h.emit('session_start', { reason: 'startup' }); await h.command();
-  h.addBatch(['plan_submit', 'plan_read_file']);
+  h.addBatch(['plan_submit', 'web_search']);
   assert.equal((await h.emit('tool_call', { toolName: 'plan_submit', toolCallId: 'call-0' })).block, true);
   await assert.rejects(h.tools.get('plan_submit').execute('call-0', { markdown, baseRevision: 0 }, undefined, undefined, h.ctx), /独占/);
   h.addBatch(['plan_submit']);
