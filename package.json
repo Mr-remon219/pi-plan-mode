@@ -1,0 +1,29 @@
+{
+  "name": "@mr_remon/pi-plan-mode",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Native Plan Mode for Pi: read-only exploration, full Markdown plan review, and explicit approval before execution.",
+  "license": "MIT",
+  "author": "Mr-remon219",
+  "homepage": "https://github.com/Mr-remon219/pi-plan-mode#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mr-remon219/pi-plan-mode.git"
+  },
+  "bugs": { "url": "https://github.com/Mr-remon219/pi-plan-mode/issues" },
+  "keywords": ["pi-package", "pi", "plan-mode", "planning", "tui", "coding-agent"],
+  "engines": { "node": ">=24" },
+  "files": ["src/", "README.md", "LICENSE", "CHANGELOG.md", "docs/design.md"],
+  "pi": { "extensions": ["./src/index.ts"] },
+  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/" },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "scripts": {
+    "test": "node scripts/verify.mjs test",
+    "typecheck": "node scripts/verify.mjs typecheck",
+    "smoke": "node scripts/verify.mjs smoke"
+  }
+}
