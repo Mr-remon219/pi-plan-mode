@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 — 2026-09-06
+
+- Stream final plans as ordinary assistant `<proposed_plan>` Markdown instead of a large `plan_submit` tool argument.
+- Capture and persist exactly one complete plan only after a successful assistant turn.
+- Keep interrupted, aborted, malformed, ambiguous, and oversized plan output in `planning` rather than making it approvable.
+- Remove duplicate plan copies from tool-call arguments and tool results; retain `plan_submit` only as a rejected legacy name.
+- Add regression coverage for transport-failure and malformed-block behavior.
+
 ## 0.2.0 — 2026-09-06
 
 - Replace the restrictive planning-tool allowlist with an exploration-first policy.

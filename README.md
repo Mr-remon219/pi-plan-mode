@@ -1,6 +1,6 @@
 # Pi Plan Mode
 
-A native, stateful Plan Mode for [Pi](https://github.com/earendil-works/pi): explore safely, submit a complete Markdown plan, review it in the TUI, and explicitly approve before execution.
+A native, stateful Plan Mode for [Pi](https://github.com/earendil-works/pi): explore safely, stream a complete Markdown plan, review it in the TUI, and explicitly approve before execution.
 
 Pi 原生、独立、有状态的 `/plan` 规划模式。它不是“少开几个工具”的提示词，也不是 todo 列表：规划状态、完整计划工件和执行批准由扩展管理。
 
@@ -8,7 +8,7 @@ Pi 原生、独立、有状态的 `/plan` 规划模式。它不是“少开几�
 
 - **Independent state** — `off → planning → ready`, persisted on the active Pi session branch.
 - **Free exploration** — keeps your existing shell, web research, search, MCP, and subagent tools available while planning.
-- **Complete plan artifact** — the model submits full Markdown through `plan_submit`; no lossy step extraction.
+- **Streamed plan artifact** — the model outputs ordinary `<proposed_plan>` Markdown; the host captures it after a successful turn, without a giant tool-call argument.
 - **Native TUI review** — scroll the full plan, continue planning, send feedback, edit the plan directly, exit without executing, or approve execution.
 - **Explicit approval** — the model cannot approve its own plan. Cancellation never executes.
 - **Session-aware recovery** — restores state across reload, resume, tree navigation, and compaction without replaying execution.
@@ -67,9 +67,11 @@ The extension combines three Pi-native controls:
 2. The existing tool set, minus Pi's direct local-file mutation tools (`edit`, `write`, and `apply_patch`).
 3. A `tool_call` gate that blocks those direct file-editing tools while leaving shell, web, research, MCP, subagent, and unknown extension tools available.
 
-State and full Markdown are stored in versioned `CustomEntry` records and reconstructed with `SessionManager.getBranch()`. Compaction summaries and abandoned branches are not treated as authoritative state.
+A successfully completed assistant turn containing exactly one `<proposed_plan>` block transitions `planning → ready`. The plan streams directly in the transcript; interrupted, malformed, or ambiguous blocks remain unapproved. The deprecated `plan_submit` tool is not registered, so large plans no longer depend on completing a giant JSON tool call.
 
-The plan body is limited to 64 KiB and is rejected rather than silently truncated. Direct editing uses Pi's native multiline editor; Enter saves and Shift+Enter inserts a newline.
+State and full Markdown are stored once in versioned `CustomEntry` records and reconstructed with `SessionManager.getBranch()`. Compaction summaries and abandoned branches are not treated as authoritative state.
+
+The captured plan body is limited to 64 KiB and is rejected rather than silently truncated. Direct editing uses Pi's native multiline editor; Enter saves and Shift+Enter inserts a newline.
 
 ## Security model
 
@@ -96,14 +98,14 @@ npm test
 npm run smoke
 ```
 
-The verification script resolves the SDK from an existing Pi installation; it does not run `npm install` or `npx`. The test suite contains 18 focused tests. The smoke test launches the real Pi CLI in isolated RPC mode and validates extension loading, `/plan`, free shell exploration, removal of direct edit tools, reload, and exact tool restoration.
+The verification script resolves the SDK from an existing Pi installation; it does not run `npm install` or `npx`. The test suite contains 19 focused tests. The smoke test launches the real Pi CLI in isolated RPC mode and validates extension loading, `/plan`, free shell exploration, removal of direct edit tools, reload, and exact tool restoration.
 
 See [docs/design.md](docs/design.md) for the researched design and architecture decisions.
 
 ## Limitations
 
 - The review panel shows lossless Markdown source rather than a rich rendered preview.
-- No production-model end-to-end test is included.
+- No production-model end-to-end test is included; event capture is covered through Pi lifecycle tests and the real CLI loader/RPC smoke test.
 - Desktop IME behavior relies on Pi's native editor and has automated focus/paste coverage, but no manual cross-terminal certification.
 - Shell and third-party tools are intentionally available; the prompt forbids local project writes through them, but strong enforcement requires a read-only OS/container mount.
 - Multiple extensions that independently replace Pi's active tool set are not supported together.

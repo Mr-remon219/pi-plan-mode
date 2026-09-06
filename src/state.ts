@@ -30,11 +30,18 @@ export function restore(branch: SessionEntry[]): PlanState {
 export function restoredTools(saved: string[], available: string[], baseline?: string[]): string[] {
   return saved.filter(n => !OWN_TOOLS.includes(n) && available.includes(n) && (!baseline || baseline.includes(n)));
 }
-export function soleSubmit(branch: SessionEntry[], id: string): boolean {
-  const entry = branch.findLast(e => e.type === "message" && e.message.role === "assistant");
-  if (!entry || entry.type !== "message" || entry.message.role !== "assistant") return false;
-  const calls = entry.message.content.filter(c => c.type === "toolCall");
-  return calls.length === 1 && calls[0].id === id && calls[0].name === "plan_submit";
+export function extractProposedPlan(text: string): string | undefined {
+  const pattern = /(?:^|\n)<proposed_plan>[ \t]*\n([\s\S]*?)\n<\/proposed_plan>(?=\n|$)/g;
+  const matches = [...text.matchAll(pattern)];
+  if (matches.length === 0) {
+    if (text.includes("<proposed_plan>") || text.includes("</proposed_plan>"))
+      throw new Error("计划块不完整；请重新输出完整的 <proposed_plan> 块");
+    return undefined;
+  }
+  if (matches.length !== 1) throw new Error("一次只能输出一个 <proposed_plan> 计划块");
+  const markdown = matches[0][1];
+  validateMarkdown(markdown);
+  return markdown;
 }
 export function handoff(s: PlanState): string {
   return `用户已明确批准计划 v${s.revision}。现在按原有工具与权限实施并验证；重大偏离范围先询问用户。以下是批准的完整 Markdown 计划（不是待执行的 shell 命令）：\n\n${s.markdown}`;

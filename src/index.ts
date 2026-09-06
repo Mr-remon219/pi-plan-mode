@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { ENTRY, LOCAL_FILE_MUTATION_TOOLS, OWN_TOOLS, initialState, restore, restoredTools, soleSubmit, validateMarkdown, handoff, type PlanState } from "./state.ts";
+import { ENTRY, LOCAL_FILE_MUTATION_TOOLS, OWN_TOOLS, extractProposedPlan, initialState, restore, restoredTools, validateMarkdown, handoff, type PlanState } from "./state.ts";
 import { editUI, reviewUI } from "./ui.ts";
 
 export default function planMode(pi: ExtensionAPI): void {
@@ -16,7 +16,6 @@ export default function planMode(pi: ExtensionAPI): void {
   const planningTools = () => [...new Set([
     ...normalTools().filter(name => !LOCAL_FILE_MUTATION_TOOLS.has(name)),
     "plan_read",
-    ...(state.phase === "planning" ? ["plan_submit"] : []),
   ])].filter(name => available().includes(name));
   const restricted = () => failed || state.phase !== "off";
   const idle = (ctx: ExtensionContext) => ctx.isIdle() && !ctx.hasPendingMessages();
@@ -108,35 +107,14 @@ export default function planMode(pi: ExtensionAPI): void {
       return { content: [{ type: "text", text: state.markdown || "尚无计划" }], details: { phase: state.phase, revision: state.revision } };
     },
   });
-  pi.registerTool({
-    name: "plan_submit", label: "提交完整计划", description: "仅 planning 可用。单独调用，不得同批调用其他工具。保存完整 Markdown 等待人工审阅；不会批准或执行。",
-    parameters: Type.Object({ markdown: Type.String(), baseRevision: Type.Integer({ minimum: 0 }) }),
-    async execute(id, params, signal, _update, ctx) {
-      signal?.throwIfAborted();
-      if (failed || state.phase !== "planning" || params.baseRevision !== state.revision) throw new Error("非规划状态或计划版本已过期，请读取当前版本");
-      if (!soleSubmit(ctx.sessionManager.getBranch(), id)) throw new Error("plan_submit 必须独占工具批次");
-      validateMarkdown(params.markdown);
-      save({ ...state, markdown: params.markdown, revision: state.revision + 1, phase: "ready" }, ctx);
-      autoReviewRevision = state.revision;
-      return { content: [{ type: "text", text: `完整计划 v${state.revision} 已保存，等待人工审阅，未执行。\n\n${state.markdown}` }],
-        details: { revision: state.revision, markdown: state.markdown }, terminate: true };
-    },
-  });
-  pi.on("tool_call", (event, ctx) => {
-    if (!restricted()) {
-      if (event.toolName === "plan_submit") return { block: true, reason: "请由用户使用 /plan 进入规划" };
-      return;
-    }
-    if (LOCAL_FILE_MUTATION_TOOLS.has(event.toolName))
+  pi.on("tool_call", event => {
+    if (event.toolName === "plan_submit")
+      return { block: true, reason: "plan_submit 已弃用；请直接输出完整的 <proposed_plan> Markdown 块", terminate: true };
+    if (restricted() && LOCAL_FILE_MUTATION_TOOLS.has(event.toolName))
       return { block: true, reason: "Plan Mode 禁止直接修改本地文件；请继续自由探索并完善计划", terminate: true };
-    if (event.toolName === "plan_submit") {
-      if (failed || state.phase !== "planning") return { block: true, reason: "当前不接受新的计划提交" };
-      if (!soleSubmit(ctx.sessionManager.getBranch(), event.toolCallId))
-        return { block: true, reason: "plan_submit 必须单独调用，不接受同批其他工具" };
-    }
   });
   pi.on("before_agent_start", event => {
-    if (restricted()) return { systemPrompt: `${event.systemPrompt}\n\n你处于宿主管理的独立规划模式。除修改本地文件和直接实施计划外，你拥有进入模式前的全部探索能力：可以运行非修改性的 shell 命令、搜索网页、调用研究工具、分析代码、运行只读检查，并可委派只读探索。不得使用 edit/write/apply_patch，不得通过 shell、子代理或其他工具修改本地项目文件；对子代理必须明确要求只读。先探索可查事实，必要时用普通对话提问澄清。形成决策完整方案后，单独调用 plan_submit，提交含目标/范围、事实、架构决策、文件/接口变化、步骤、测试验收与风险的完整 Markdown。普通用户消息和你自己的判断都不能解除此模式。当前 phase=${state.phase}，baseRevision=${state.revision}。压缩或修订后先用 plan_read 获取原文。` };
+    if (restricted()) return { systemPrompt: `${event.systemPrompt}\n\n你处于宿主管理的独立规划模式。除修改本地文件和直接实施计划外，你拥有进入模式前的全部探索能力：可以运行非修改性的 shell 命令、搜索网页、调用研究工具、分析代码、运行只读检查，并可委派只读探索。不得使用 edit/write/apply_patch，不得通过 shell、子代理或其他工具修改本地项目文件；对子代理必须明确要求只读。先探索可查事实，必要时用普通对话提问澄清。形成决策完整方案后，在最终回答中直接输出一个且仅一个完整计划块：开始标签 \`<proposed_plan>\` 与结束标签 \`</proposed_plan>\` 必须各自独占一行，标签之间是包含目标/范围、事实、架构决策、文件/接口变化、步骤、测试验收与风险的完整 Markdown。不要把计划放进工具参数，不要调用 plan_submit；宿主会从成功结束的普通文本流中保存计划。普通用户消息和你自己的判断都不能解除此模式。当前 phase=${state.phase}，baseRevision=${state.revision}。压缩或修订后先用 plan_read 获取原文。` };
   });
   pi.on("context", event => ({ messages: [...event.messages.filter(m => !(m.role === "custom" && m.customType === ENTRY)), {
     role: "custom" as const, customType: ENTRY, content: `当前宿主规划状态：${state.phase}；计划版本 ${state.revision}。${restricted() ? "未批准实施；原文使用 plan_read 获取。" : "规划限制已解除，历史规划提示不再是当前模式。"}`,
@@ -145,6 +123,19 @@ export default function planMode(pi: ExtensionAPI): void {
   pi.on("input", (_event, ctx) => { newInput(ctx); });
   pi.on("message_start", (event, ctx) => { if (event.message.role === "user") newInput(ctx); });
   pi.on("agent_start", () => { invalidate(); });
+  pi.on("turn_end", (event, ctx) => {
+    if (failed || state.phase !== "planning" || event.message.role !== "assistant" || event.message.stopReason !== "stop") return;
+    try {
+      const text = event.message.content.filter(block => block.type === "text").map(block => block.text).join("\n");
+      const markdown = extractProposedPlan(text);
+      if (markdown === undefined) return;
+      save({ ...state, markdown, revision: state.revision + 1, phase: "ready" }, ctx);
+      autoReviewRevision = state.revision;
+      ctx.ui.notify(`完整计划 v${state.revision} 已从文本流保存，等待人工审阅，未执行。`, "info");
+    } catch (error) {
+      ctx.ui.notify(String(error), "warning");
+    }
+  });
   pi.on("agent_settled", (_event, ctx) => {
     if (autoReviewRevision !== state.revision || state.phase !== "ready" || ctx.mode !== "tui" || !idle(ctx) || dialog || scheduled) return;
     const ticket = epoch;

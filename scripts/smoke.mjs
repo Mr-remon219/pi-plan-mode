@@ -47,7 +47,7 @@ try {
   result = await request('get_entries');
   const planningTools = result.data.entries.findLast(entry => entry.customType === 'plan-smoke-tools').data;
   assert.deepEqual(planningTools.filter(name => !name.startsWith('plan_')), originalTools.filter(name => !['edit', 'write', 'apply_patch'].includes(name)));
-  assert.ok(planningTools.includes('plan_read') && planningTools.includes('plan_submit'));
+  assert.ok(planningTools.includes('plan_read') && !planningTools.includes('plan_submit'));
   result = await request('bash', { command: 'pwd' });
   assert.equal(result.data.exitCode, 0); assert.equal(result.data.output.trim(), temp);
   result = await request('prompt', { message: '/plan-smoke-reload' }); assert.equal(result.success, true);

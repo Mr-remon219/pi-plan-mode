@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import planMode from '../src/index.ts';
-import { ENTRY, OWN_TOOLS, restore, validateMarkdown } from '../src/state.ts';
+import { ENTRY, extractProposedPlan, restore, validateMarkdown } from '../src/state.ts';
+
+const ACTIVE_PLAN_TOOLS = ['plan_read'];
 
 const markdown = '# 完整计划 🧪\n\n## 架构\n保留足够长的完整说明而非截断为五十字符的任务摘要。\n'.repeat(30) + '\n```ts\nconst x = "尾部";\n```\n';
 function harness(options: any = {}) {
@@ -36,7 +38,8 @@ function harness(options: any = {}) {
   const emit = async (name: string, event: any = {}) => { let result; for (const fn of hooks.get(name) || []) result = await fn(event, ctx); return result; };
   const command = (args = '') => commands.get('plan').handler(args, ctx);
   const addBatch = (names: string[]) => sm.appendMessage({ role: 'assistant', content: names.map((name, i) => ({ type: 'toolCall', id: `call-${i}`, name, arguments: {} })) } as any);
-  const submit = async () => { addBatch(['plan_submit']); return tools.get('plan_submit').execute('call-0', { markdown, baseRevision: restore(sm.getBranch()).revision }, undefined, undefined, ctx); };
+  const submit = async (body = markdown, stopReason = 'stop', text = `<proposed_plan>\n${body}\n</proposed_plan>`) =>
+    emit('turn_end', { message: { role: 'assistant', content: [{ type: 'text', text }], stopReason } });
   return { sm, ctx, pi, emit, command, submit, addBatch, tools, messages, notifications,
     state: () => restore(sm.getBranch()), active: () => active, action: (a: any) => { action = a; }, approve: (a: any) => { approve = a; }, customCalls: () => customCalls };
 }
@@ -45,7 +48,7 @@ test('three-state flow blocks direct file edits but preserves free exploration',
   const h = harness({ active: ['read', 'bash', 'edit', 'write', 'web_search', 'subagent', 'unknown'] });
   await h.emit('session_start', { reason: 'startup' }); await h.command();
   assert.equal(h.state().phase, 'planning');
-  assert.deepEqual(h.active(), ['read', 'bash', 'web_search', 'subagent', 'unknown', ...OWN_TOOLS]);
+  assert.deepEqual(h.active(), ['read', 'bash', 'web_search', 'subagent', 'unknown', ...ACTIVE_PLAN_TOOLS]);
   for (const toolName of ['write', 'edit', 'apply_patch']) {
     assert.equal((await h.emit('tool_call', { toolName, input: {} })).block, true);
   }
@@ -53,7 +56,7 @@ test('three-state flow blocks direct file edits but preserves free exploration',
     assert.equal(await h.emit('tool_call', { toolName, input: {} }), undefined);
   }
   assert.equal(await h.emit('user_bash'), undefined);
-  const result = await h.submit(); assert.equal(result.terminate, true); assert.equal(h.state().markdown, markdown);
+  await h.submit(); assert.equal(h.state().markdown, markdown);
   assert.equal(h.state().phase, 'ready'); assert.deepEqual(h.active(), ['read', 'bash', 'web_search', 'subagent', 'unknown', 'plan_read']);
   assert.equal(h.messages.length, 0);
   await h.command('--execute'); assert.equal(h.messages.length, 0);
@@ -82,7 +85,7 @@ test('reload uses saved pre-planning tools, including original restrictions', as
 test('all original non-editing capabilities remain active during planning', async () => {
   const original = ['read', 'bash', 'web_search', 'fetch_page', 'subagent', 'custom_research', 'edit', 'write'];
   const h = harness({ active: original }); await h.emit('session_start', { reason: 'startup' }); await h.command();
-  assert.deepEqual(h.active(), ['read', 'bash', 'web_search', 'fetch_page', 'subagent', 'custom_research', ...OWN_TOOLS]);
+  assert.deepEqual(h.active(), ['read', 'bash', 'web_search', 'fetch_page', 'subagent', 'custom_research', ...ACTIVE_PLAN_TOOLS]);
   await h.submit();
   assert.deepEqual(h.active(), ['read', 'bash', 'web_search', 'fetch_page', 'subagent', 'custom_research', 'plan_read']);
   await h.command('--exit'); assert.deepEqual(h.active(), original);
@@ -105,14 +108,21 @@ test('active branch restoration ignores compaction summaries and other branches'
   h.sm.branch(ready); await h.emit('session_tree'); assert.deepEqual(h.active(), ['read', 'bash', 'plan_read']); assert.equal(h.messages.length, 0);
 });
 
-test('same-batch submit fails, cancelled submit never persists', async () => {
+test('only a complete successful proposed-plan text block persists', async () => {
   const h = harness(); await h.emit('session_start', { reason: 'startup' }); await h.command();
-  h.addBatch(['plan_submit', 'web_search']);
-  assert.equal((await h.emit('tool_call', { toolName: 'plan_submit', toolCallId: 'call-0' })).block, true);
-  await assert.rejects(h.tools.get('plan_submit').execute('call-0', { markdown, baseRevision: 0 }, undefined, undefined, h.ctx), /独占/);
-  h.addBatch(['plan_submit']);
-  await assert.rejects(h.tools.get('plan_submit').execute('call-0', { markdown, baseRevision: 0 }, AbortSignal.abort(), undefined, h.ctx));
-  assert.equal(h.state().revision, 0);
+  assert.equal(h.tools.has('plan_submit'), false);
+  assert.equal((await h.emit('tool_call', { toolName: 'plan_submit', toolCallId: 'stale' })).block, true);
+  await h.submit(markdown, 'error'); assert.equal(h.state().revision, 0);
+  await h.submit(markdown, 'aborted'); assert.equal(h.state().revision, 0);
+  await h.submit(markdown, 'stop', `<proposed_plan>\n${markdown}`); assert.equal(h.state().revision, 0);
+  await h.submit(); assert.equal(h.state().revision, 1); assert.equal(h.state().markdown, markdown);
+});
+
+test('proposed-plan parser rejects ambiguity and leaves ordinary text alone', () => {
+  assert.equal(extractProposedPlan('普通规划讨论'), undefined);
+  assert.equal(extractProposedPlan(`<proposed_plan>\n${markdown}\n</proposed_plan>`), markdown);
+  assert.throws(() => extractProposedPlan('<proposed_plan>\nincomplete'));
+  assert.throws(() => extractProposedPlan('<proposed_plan>\na\n</proposed_plan>\n<proposed_plan>\nb\n</proposed_plan>'));
 });
 
 test('cancel, stale input/navigation and queued confirmation cannot approve', async () => {
@@ -160,7 +170,8 @@ test('continue, feedback and native editor save are not approvals', async () => 
 test('invalid markdown and storage errors keep gate restricted', async () => {
   assert.throws(() => validateMarkdown('x'.repeat(65537))); assert.throws(() => validateMarkdown('\x1b[31m bad'));
   const h = harness(); await h.emit('session_start', { reason: 'startup' }); await h.command();
-  h.pi.appendEntry = () => { throw new Error('disk full'); }; await assert.rejects(h.submit(), /disk full/);
+  h.pi.appendEntry = () => { throw new Error('disk full'); }; await h.submit();
+  assert.ok(h.notifications.some((text: string) => text.includes('disk full')));
   await h.command('--exit'); assert.equal((await h.emit('tool_call', { toolName: 'write' })).block, true);
   assert.equal(h.messages.length, 0);
 });
